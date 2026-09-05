@@ -49,7 +49,7 @@ Return the result in clean markdown format.
 ATS Score: XX/100
 """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash",
         contents=prompt
     )
     return response.text
