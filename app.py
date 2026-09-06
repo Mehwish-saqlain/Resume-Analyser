@@ -1,76 +1,246 @@
 import streamlit as st
-from google import genai
-from PyPDF2 import PdfReader
-import os
+import google.generativeai as genai
+import pdfplumber
+import docx
+import json
+from io import BytesIO
 
-st.set_page_config(page_title="ATS Resume Checker", page_icon="📄", layout="wide")
+# -----------------------------
+# PAGE CONFIG
+# -----------------------------
+st.set_page_config(
+    page_title="ATS Resume Checker",
+    page_icon="📄",
+    layout="wide"
+)
 
-api_key = st.secrets.get("GEMINI_API_KEY", None)
-if not api_key:
-    api_key = os.getenv("GEMINI_API_KEY")
-
-if not api_key:
-    st.error("GEMINI_API_KEY not found.")
+# -----------------------------
+# GEMINI CONFIG
+# -----------------------------
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=api_key)
+except Exception:
+    st.error("Gemini API key not found in Streamlit Secrets.")
     st.stop()
 
-client = genai.Client(api_key=api_key)
+MODEL_NAME = "gemini-2.5-flash"
 
-def extract_text_from_pdf(pdf_file):
+# -----------------------------
+# HELPERS
+# -----------------------------
+def extract_pdf_text(file):
     text = ""
-    try:
-        reader = PdfReader(pdf_file)
-        for page in reader.pages:
+
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
             page_text = page.extract_text()
+
             if page_text:
-                text += page_text + "\\n"
-    except Exception as e:
-        return f"Error reading PDF: {str(e)}"
+                text += page_text + "\n"
+
     return text
 
-def analyze_resume(resume_text):
-    prompt = f"""
-You are a professional ATS (Applicant Tracking System) and Resume Reviewer.
 
-Analyze the following resume and provide:
-1. ATS Score out of 100
-2. Executive Summary
-3. Strengths
-4. Weaknesses
-5. Missing Keywords
-6. Formatting Issues
-7. Resume Improvement Suggestions
-8. Recommended Skills to Add
-9. Final Verdict
+def extract_docx_text(file):
+    document = docx.Document(file)
 
-Resume:
-{resume_text}
+    text = []
 
-Return the result in clean markdown format.
-ATS Score: XX/100
-"""
-    response = client.models.generate_content(
-        model="gemini-2.5-pro",
-        contents=prompt
-    )
-    return response.text
+    for para in document.paragraphs:
+        text.append(para.text)
 
-st.title("📄 ATS Resume Checker")
-st.markdown("Upload your resume and receive an ATS score with detailed improvement suggestions.")
+    return "\n".join(text)
 
-uploaded_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
 
-if uploaded_file:
-    with st.spinner("Reading resume..."):
-        resume_text = extract_text_from_pdf(uploaded_file)
+def get_resume_text(uploaded_file):
+    filename = uploaded_file.name.lower()
 
-    if len(resume_text.strip()) < 100:
-        st.warning("Very little text was extracted from the PDF.")
+    if filename.endswith(".pdf"):
+        return extract_pdf_text(uploaded_file)
+
+    elif filename.endswith(".docx"):
+        return extract_docx_text(uploaded_file)
+
     else:
-        st.success("Resume uploaded successfully!")
+        return ""
 
-        if st.button("Analyze Resume"):
-            with st.spinner("Analyzing with Gemini Flash..."):
-                result = analyze_resume(resume_text)
 
-            st.markdown("## Analysis Report")
-            st.markdown(result)
+# -----------------------------
+# GEMINI ANALYSIS
+# -----------------------------
+def analyze_resume(resume_text, job_description):
+
+    model = genai.GenerativeModel(MODEL_NAME)
+
+    prompt = f"""
+You are an expert ATS Resume Reviewer.
+
+Analyze the resume against the provided Job Description.
+
+Return ONLY valid JSON.
+
+JSON format:
+
+{{
+  "ats_score": number,
+  "keyword_match_score": number,
+  "missing_keywords": [],
+  "strengths": [],
+  "weaknesses": [],
+  "improvements": [],
+  "section_feedback": {{
+      "summary": "",
+      "experience": "",
+      "education": "",
+      "skills": ""
+  }},
+  "overall_feedback": ""
+}}
+
+JOB DESCRIPTION:
+{job_description}
+
+RESUME:
+{resume_text}
+"""
+
+    response = model.generate_content(prompt)
+
+    text = response.text.strip()
+
+    if text.startswith("```json"):
+        text = text.replace("```json", "")
+        text = text.replace("```", "")
+
+    elif text.startswith("```"):
+        text = text.replace("```", "")
+
+    return json.loads(text)
+
+
+# -----------------------------
+# UI
+# -----------------------------
+st.title("📄 ATS Resume Checker")
+
+st.markdown(
+    """
+Upload your resume and compare it against a Job Description.
+Get ATS Score, Keyword Match, Missing Keywords, and Improvement Suggestions.
+"""
+)
+
+uploaded_file = st.file_uploader(
+    "Upload Resume",
+    type=["pdf", "docx"]
+)
+
+job_description = st.text_area(
+    "Paste Job Description",
+    height=250
+)
+
+if st.button("Analyze Resume", type="primary"):
+
+    if uploaded_file is None:
+        st.warning("Please upload a resume.")
+        st.stop()
+
+    if not job_description.strip():
+        st.warning("Please enter a job description.")
+        st.stop()
+
+    with st.spinner("Analyzing Resume..."):
+
+        try:
+
+            resume_text = get_resume_text(uploaded_file)
+
+            result = analyze_resume(
+                resume_text,
+                job_description
+            )
+
+            st.success("Analysis Completed")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.metric(
+                    "ATS Score",
+                    f"{result['ats_score']}/100"
+                )
+
+            with col2:
+                st.metric(
+                    "Keyword Match",
+                    f"{result['keyword_match_score']}%"
+                )
+
+            st.divider()
+
+            st.subheader("Missing Keywords")
+
+            if result["missing_keywords"]:
+                for keyword in result["missing_keywords"]:
+                    st.write("❌", keyword)
+            else:
+                st.write("No major keywords missing.")
+
+            st.divider()
+
+            st.subheader("Strengths")
+
+            for item in result["strengths"]:
+                st.write("✅", item)
+
+            st.divider()
+
+            st.subheader("Weaknesses")
+
+            for item in result["weaknesses"]:
+                st.write("⚠️", item)
+
+            st.divider()
+
+            st.subheader("Improvement Suggestions")
+
+            for item in result["improvements"]:
+                st.write("💡", item)
+
+            st.divider()
+
+            st.subheader("Section Feedback")
+
+            sf = result["section_feedback"]
+
+            st.write("### Summary")
+            st.write(sf["summary"])
+
+            st.write("### Experience")
+            st.write(sf["experience"])
+
+            st.write("### Education")
+            st.write(sf["education"])
+
+            st.write("### Skills")
+            st.write(sf["skills"])
+
+            st.divider()
+
+            st.subheader("Overall Feedback")
+            st.write(result["overall_feedback"])
+
+            st.download_button(
+                label="Download Analysis JSON",
+                data=json.dumps(
+                    result,
+                    indent=4
+                ),
+                file_name="ats_analysis.json",
+                mime="application/json"
+            )
+
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
