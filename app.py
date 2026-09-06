@@ -29,7 +29,13 @@ except Exception:
     )
     st.stop()
 
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = st.sidebar.selectbox(
+    "Select Gemini Model",
+    [
+        "gemini-3.6-flash",
+        "gemini-3.6-pro"
+    ]
+)
 
 # =========================
 # FILE EXTRACTION
